@@ -8,8 +8,9 @@ import time
 import typing as ty
 
 import logging
-
+logging.basicConfig()
 log = logging.getLogger("aursync")
+
 log.setLevel("DEBUG")
 
 
@@ -20,9 +21,9 @@ def message():
 @pytest.mark.asyncio
 @pytest.mark.repeat(1)
 async def test_long_async_handler(event_loop):
-    pub = aursync.messager.Messager()
+    pub = aursync.sync.Sync()
     await pub.init()
-    sub = aursync.messager.Messager()
+    sub = aursync.sync.Sync()
     await sub.init()
     messages_seen = []
 
@@ -49,9 +50,9 @@ async def test_long_async_handler(event_loop):
 @pytest.mark.asyncio
 @pytest.mark.repeat(1)
 async def test_multpub(event_loop):
-    sub = await aursync.messager.Messager().init()
+    sub = await aursync.sync.Sync().init()
 
-    pubs = [await aursync.messager.Messager(name=str(i)).init() for i in range(10)]
+    pubs = [await aursync.sync.Sync(name=str(i)).init() for i in range(10)]
 
     messages_seen = set()
     messages_sent = set()
@@ -67,7 +68,7 @@ async def test_multpub(event_loop):
         log.info(f"it {i}")
         message_list = [message() for _ in range(len(pubs))]
         messages_sent.update(set(message_list))
-        res = sum(aursync.messager._flatten(await asyncio.gather(*[pub.publish(mess, "test") for mess, pub in zip(message_list, pubs)])))
+        res = sum(aursync.sync._flatten(await asyncio.gather(*[pub.publish(mess, "test") for mess, pub in zip(message_list, pubs)])))
         supertot += res
 
     await asyncio.sleep(0.05)
@@ -85,9 +86,9 @@ async def test_multsub(event_loop):
     import collections
     sub_count = 10
     pub_loop_count = 100
-    subs = [await aursync.messager.Messager().init() for _ in range(sub_count)]
+    subs = [await aursync.sync.Sync().init() for _ in range(sub_count)]
 
-    pub = await aursync.messager.Messager().init()
+    pub = await aursync.sync.Sync().init()
 
 
     messages_seen = collections.deque()
@@ -116,9 +117,9 @@ async def test_multsub(event_loop):
 @pytest.mark.asyncio
 @pytest.mark.repeat(1)
 async def test_long_sync_handler(event_loop):
-    pub = aursync.messager.Messager()
+    pub = aursync.sync.Sync()
     await pub.init()
-    sub = aursync.messager.Messager()
+    sub = aursync.sync.Sync()
     await sub.init()
     messages_seen = []
 
