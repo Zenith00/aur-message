@@ -5,54 +5,30 @@ import functools
 import inspect
 import logging
 import operator
+import collections
 import typing as ty
 import warnings
 import contextlib
 import time
 import operator
+# from typing import Iterator, _T_co, _KT, _VT_co, _VT
+# from typing import Iterator, _T_co, _KT, _VT_co, _VT
+from typing import Iterator, _T_co
+
 import aioredis  # type: ignore
 import jsonpickle  # type:ignore
 from aioredis import Redis
+import aursync.flattener as flattener
+import aursync.mpmc as mpmc
 
-from aursync.mpmc import MPMC
+# from aursync.mpmc import MPMC
 
 log = logging.getLogger("aursync")
 
 _FLAG_FIRST = object()
 
-_DICT_FLATTEN_SEP = "⸱"  # u"\u2E31"
 
-
-def _flatten_dict(d, join=lambda l, r: l + _DICT_FLATTEN_SEP + r, lift=lambda x: x):
-    results = []
-
-    def visit(subdict, res, partialKey):
-        for k, v in subdict.items():
-            newKey = lift(k) if partialKey == _FLAG_FIRST else join(join(partialKey, _DICT_FLATTEN_SEP), lift(k))
-            if isinstance(v, ty.Mapping):
-                visit(v, res, newKey)
-            else:
-                res.append((newKey, v))
-
-    visit(d, results, _FLAG_FIRST)
-    return results
-
-
-def _inflate(d):
-    items = dict()
-    for k, v in d.items():
-        keys = k.split(_DICT_FLATTEN_SEP)
-        sub_items = items
-        for ki in keys[:-1]:
-            try:
-                sub_items = sub_items[ki]
-            except KeyError:
-                sub_items[ki] = dict()
-                sub_items = sub_items[ki]
-
-        sub_items[keys[-1]] = v
-
-    return items
+# noinspection PyPep8Naming
 
 
 def _listify_arg(listy: ty.Optional[ty.Union[str, ty.Iterable[ty.Any]]]
@@ -127,57 +103,103 @@ from aioredis import commands
 
 # noinspection PyAbstractClass
 class AurRedis(commands.Redis):
-    def aur_get(self,
+    def aur_get(
+            self,
             keys=ty.Union[str, ty.Iterable[str]]
     ) -> ty.Coroutine[ty.Union[str, ty.List[str]], None, None]:
         if isinstance(keys, ty.Iterable):
             keys = list(keys)
-            return self.mget(*keys)
-        return self.get(keys)
+            return self.mget(*keys, encoding="utf-8")
+        return self.get(keys, encoding="utf-8")
 
-    def aur_set(self,
-            keyval_pairs=ty.Union[ty.Tuple[str, str],
-                                  ty.Iterable[ty.Tuple[str, str]],
-                                  ty.Dict[str, str]]
-    ) -> ty.Coroutine:
+    async def aur_set(
+            self,
+            keyval_pairs: ty.Union[ty.Tuple[str, str],
+                                   ty.List[ty.Tuple[str, str]],
+                                   ty.Dict[str, str]],
+            setopt: str = ""
+    ) -> ty.Union[bool, ty.Tuple[bool, ...]]:
 
-        if isinstance(keyval_pairs, ty.Iterable):
-            keyval_pairs = list(keyval_pairs)
-            return self.mset(*keyval_pairs)
+        if isinstance(keyval_pairs, ty.List):
+            return await asyncio.gather(*[self.aur_set(keyval_pairs=pair, setopt=setopt)
+                                          for pair in keyval_pairs])
         if isinstance(keyval_pairs, ty.Dict):
-            keyval_pairs = keyval_pairs.values()
-            return self.mset(*keyval_pairs)
-        if isinstance(keyval_pairs, ty.Tuple):  # type: ignore
-            return self.set(*keyval_pairs)
+            return await self.mset(*keyval_pairs.values())
+        if isinstance(keyval_pairs, tuple):
+            return await self.set(*keyval_pairs)
         raise RuntimeWarning("aur_set called with invalid keyval_pairs type")
 
-    def aur_set_dict(self, key: str, d: dict) -> ty.Coroutine:
-        flattened_dict = _flatten_dict(d)
+    async def aur_set_dict(self, key: str, d: dict, update=False):
+        if not update:
+            await self.delete(key)
+        flattened_dict = flattener.flatten(d)
         return self.hmset_dict(key, flattened_dict)
 
-    def aur_get_dict(self, key, fields=None) -> ty.Coroutine:
+    async def aur_get_dict(self, key, fields=None):
         if fields:
-            flattened_dict = self.hmget(key, fields[0], *fields[1:])
+            flattened_dict = await self.hmget(key, fields[0], *fields[1:], encoding="utf-8")
         else:
-            flattened_dict = self.hgetall(key)
-        return _inflate(flattened_dict)
+            flattened_dict = await self.hgetall(key, encoding="utf-8")
+        return flattener.inflate(flattened_dict)
 
 
-class _ConfigProxy():
-    def __init__(self, redis: aioredis.Redis):
-        self.redis = redis
+class _ConfigProxy:
+
+    def __init__(self, sync: Sync, key_root):
+        self.key_root: str = key_root
+        self.hm_key = ""
+        self.sync = sync
+
+    def _verify_redis(self) -> None:
+        if not self.sync.ready:
+            raise RuntimeError("Sync redis not ready!")
+        if not self.sync.redis:
+            raise RuntimeError("<???>: Sync is ready but redis is None")
+        if self.sync.redis.closed:
+            raise RuntimeError("Sync redis is closed!")
+
+    def __setitem__(self, k: flattener.FlatKey, v: str) -> None:
+        self._verify_redis()
+        self.compose_key(k)
+
+        assert self.sync.redis is not None  # dummy for Mypy
+        self.sync.redis.hmset(self.key_root, self.hm_key, v)
+
+    def compose_key(self, k) -> None:
+        sep: flattener.FlatContainerType
+        sep = list if isinstance(k, int) else dict
+        self.hm_key = flattener.compose_keys(self.hm_key, k, sep)
+
+    def __delitem__(self, k: flattener.FlatKey) -> None:
+        self._verify_redis()
+        self.compose_key(k)
+
+        assert self.sync.redis is not None  # dummy for Mypy
+        self.sync.redis.hdel(self.key_root, self.hm_key)
+
+    def __getitem__(self, k: flattener.FlatKey) -> _ConfigProxy:
+        self._verify_redis()
+        self.compose_key(k)
+
+        assert self.sync.redis is not None  # dummy for  Mypy
+        return self
+
+    def __str__(self) -> str:
+        assert self.sync.redis is not None  # dummy for  Mypy
+        return self.sync.redis.hmget(self.key_root, self.hm_key)
 
 
-class Sync():
-    redis: ty.Optional[Redis]
-    _mpmc: ty.Optional[MPMC]
+class Sync:
+    redis: ty.Optional[AurRedis]
+    _mpmc: ty.Optional[mpmc.MPMC]
     _receiver: ty.Optional[aioredis.pubsub.Receiver]
+    p: _ConfigProxy
 
     @_link_args(("serializer", "deserializer"))
     def __init__(
             self,
             name="Anon",
-            redis: AurRedis = None,
+            redis: ty.Optional[AurRedis] = None,
             serializer: ty.Callable[[T_m], ty.Any] = jsonpickle.dumps,
             deserializer: ty.Callable[[ty.Any], T_m] = jsonpickle.loads):
         self.name = name
@@ -185,30 +207,30 @@ class Sync():
         self._deserializer = deserializer
         self._waiting_handler_ct = 0
         self._waiting_handlers_done = asyncio.Event()
-        self.redis: AurRedis = redis
+        self.redis = redis
         self._receiver = None
-        self._init = False
+        self.ready = False
 
     async def init(self) -> Sync:
-        if self._init:
+        if self.ready:
             warnings.warn(f"[{self.name} already init'd, ignoring", RuntimeWarning)
             return self
-        self._init = True
 
         if self.redis is None:
             self.redis: AurRedis = await aioredis.create_redis_pool('redis://localhost', maxsize=5,
                                                                     commands_factory=AurRedis)
             log.info(f"[{self.name} no redis provided, creating pool")
+        self.ready = True
 
-        self._mpmc: MPMC = MPMC(redis_conn=self.redis,
-                                serializer=self._serializer,
-                                deserializer=self._deserializer)
+        self._mpmc = mpmc.MPMC(redis_conn=self.redis,
+                               serializer=self._serializer,
+                               deserializer=self._deserializer)
 
         self._waiting_handler_ct = 0
         self._waiting_handlers_done.clear()
         await self._mpmc.start()
         await asyncio.sleep(0.1)
-
+        self.p = _ConfigProxy(sync=self)
         return self
 
     async def stop(self):
@@ -227,7 +249,7 @@ class Sync():
 
     async def _handle(
             self,
-            handler_func: ty.Callable[[T_m], ty.Any],
+            handler_func: ty.Callable[[mpmc.T_m], ty.Any],
             channel: str,
             is_pattern: bool = False
     ) -> None:
@@ -259,7 +281,7 @@ class Sync():
 
     def subscribe(
             self,
-            handler_func: ty.Callable[[T_m], ty.Any],
+            handler_func: ty.Callable[[mpmc.T_m], ty.Any],
             channels: ty.Union[str, ty.List[str]] = None,
             channel_patterns: ty.Union[str, ty.List[str]] = None,
             wait=True
@@ -276,7 +298,7 @@ class Sync():
         :param wait: Return a sleep of 100ms for subscription to process
         :return: 100 ms asyncio.sleep to ensure proper handler registration if wait, otherwise none
         """
-        if not self._init:
+        if not self.ready:
             raise RuntimeWarning("Called subscribe on un-init AurSync client")
         listy_channels = _listify_arg(channels)
         listy_channel_patterns = _listify_arg(channel_patterns)
@@ -295,12 +317,12 @@ class Sync():
     @_link_args(("wait", "callback"))
     def publish(
             self,
-            message: T_m,
+            message: mpmc.T_m,
             channels: ty.Union[str, ty.List[str]] = None,
             wait: bool = True,
-            callback: ty.Callable[[T_m], ty.Any] = None
+            callback: ty.Callable[[mpmc.T_m], ty.Any] = None
     ) -> ty.Union[ty.Awaitable, None]:
-        if not self._init:
+        if not self.ready:
             raise RuntimeWarning("Called subscribe on un-init AurSync client")
         assert self._mpmc is not None
         listy_channels = _listify_arg(channels)
@@ -314,11 +336,3 @@ class Sync():
                 for t_coro in pub_coros:
                     asyncio.create_task(t_coro).add_done_callback(lambda x: callback(x.result()))  # type: ignore
         return None
-    # @contextlib.asynccontextmanager
-    # async def acquire_conn(self
-    # ) -> ty.AsyncContextManager[aioredis.ConnectionsPool]:
-    #     conn: aioredis.RedisConnection = await self.redis.acquire()
-    #     try:
-    #         yield conn
-    #     finally:
-    #         await conn.close()

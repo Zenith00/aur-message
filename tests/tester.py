@@ -48,7 +48,7 @@ async def test_long_async_handler(event_loop):
 
 
 @pytest.mark.asyncio
-@pytest.mark.repeat(1)
+@pytest.mark.repeat(1)o
 async def test_multpub(event_loop):
     sub = await aursync.sync.Sync().init()
 
