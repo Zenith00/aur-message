@@ -13,7 +13,7 @@ import time
 import operator
 # from typing import Iterator, _T_co, _KT, _VT_co, _VT
 # from typing import Iterator, _T_co, _KT, _VT_co, _VT
-from typing import Iterator, _T_co
+# from typing import Iterator, _T_co
 
 import aioredis  # type: ignore
 import jsonpickle  # type:ignore
@@ -193,7 +193,7 @@ class Sync:
     redis: ty.Optional[AurRedis]
     _mpmc: ty.Optional[mpmc.MPMC]
     _receiver: ty.Optional[aioredis.pubsub.Receiver]
-    p: _ConfigProxy
+    p: ty.Callable[[str], _ConfigProxy]
 
     @_link_args(("serializer", "deserializer"))
     def __init__(
@@ -230,7 +230,7 @@ class Sync:
         self._waiting_handlers_done.clear()
         await self._mpmc.start()
         await asyncio.sleep(0.1)
-        self.p = _ConfigProxy(sync=self)
+        self.p = functools.partial(_ConfigProxy.__init__, self)
         return self
 
     async def stop(self):

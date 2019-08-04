@@ -13,7 +13,6 @@ log = logging.getLogger("aursync")
 
 log.setLevel("DEBUG")
 
-
 def makeEvilDict(n):
     return functools.reduce(lambda acc, x: {x: acc}, ([{str(i) + "→": "0" for i in range(n)}] + [str(x) for x in range(n)]))
 
@@ -35,6 +34,9 @@ async def test_dict_getset(event_loop):
 
     assert result_dict == test_dict
 
+@pytest.mark.asyncio
+async def test_proxy_get(event_loop):
+    sync_client = await aursync.Sync().init()
 
 # @pytest.mark.asyncio
 # async def test_dict_getset_list(event_loop):
