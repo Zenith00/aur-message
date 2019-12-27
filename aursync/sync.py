@@ -5,21 +5,19 @@ import functools
 import inspect
 import logging
 import operator
-import collections
 import typing as ty
 import warnings
-import contextlib
-import time
-import operator
-# from typing import Iterator, _T_co, _KT, _VT_co, _VT
-# from typing import Iterator, _T_co, _KT, _VT_co, _VT
-# from typing import Iterator, _T_co
 
 import aioredis  # type: ignore
 import jsonpickle  # type:ignore
-from aioredis import Redis
+
 import aursync.flattener as flattener
 import aursync.mpmc as mpmc
+from aursync.config_proxy import _ConfigProxy
+
+# from typing import Iterator, _T_co, _KT, _VT_co, _VT
+# from typing import Iterator, _T_co, _KT, _VT_co, _VT
+# from typing import Iterator, _T_co
 
 # from aursync.mpmc import MPMC
 
@@ -32,7 +30,7 @@ _FLAG_FIRST = object()
 
 
 def _listify_arg(listy: ty.Optional[ty.Union[str, ty.Iterable[ty.Any]]]
-) -> ty.Iterable[ty.Any]:
+                 ) -> ty.Iterable[ty.Any]:
     if listy is None:
         return []
     list_like__types = list, tuple, set
@@ -89,7 +87,7 @@ def _link_args(func, *arg_tups):
 
 
 def _timegate(coro: ty.Awaitable, gate=0.01
-) -> ty.Awaitable:
+              ) -> ty.Awaitable:
     async def wrap():
         res = await asyncio.gather(coro, asyncio.sleep(gate))
         return res[0]
@@ -141,8 +139,6 @@ class AurRedis(commands.Redis):
         else:
             flattened_dict = await self.hgetall(key, encoding="utf-8")
         return flattener.inflate(flattened_dict)
-
-
 
 
 class Sync:
