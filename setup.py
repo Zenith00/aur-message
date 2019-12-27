@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="aursync",
-    version="0.0.2",
+    version="0.0.4",
     author="Zenith00",
     author_email="Zenith00dev@gmail.com",
     description="Synchronization library for Aurora",
